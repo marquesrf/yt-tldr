@@ -48,7 +48,19 @@ yt-tldr
 
 # Pick a different model
 yt-tldr -model qwen2.5:14b "https://youtu.be/VIDEO_ID"
+
+# Skip the language prompt (e.g. for a Portuguese video)
+yt-tldr -lang pt "https://youtu.be/VIDEO_ID"
 ```
+
+When you pass a URL without `-lang`, it asks which language to download, defaulting to English on Enter:
+
+```
+Transcript language — default is English [en].
+Enter a language code (e.g. pt, es, fr) or press Enter for English:
+```
+
+Pick your own language and English is still tried as a fallback if that track doesn't exist.
 
 ### Flags
 
@@ -56,6 +68,7 @@ yt-tldr -model qwen2.5:14b "https://youtu.be/VIDEO_ID"
 |------|---------|---------|
 | `-model` | `gemma4:12b` | Ollama model to use. Change to whatever you've pulled (`ollama list`). |
 | `-dir`   | `$YT_TLDR_DIR`, else `~/Documents/youtube-videos-transcripts` | Where transcripts and summaries are read/written. |
+| `-lang`  | prompts, defaults to `en` | Transcript language code. Set it to skip the prompt (non-interactive runs default to English). |
 | `-file`  | — | Summarize an existing `.vtt` instead of downloading. |
 
 Set the output folder once instead of passing `-dir` every time:
@@ -66,7 +79,7 @@ export YT_TLDR_DIR="$HOME/notes/yt"
 
 ## How it works
 
-1. **Download** — tries subtitle languages in priority order: `en-orig` (manual/original English) → `en` (auto-translation, which YouTube rate-limits with HTTP 429) → `*-orig` (the video's original language, which never gets throttled). A non-English transcript summarizes fine.
+1. **Download** — for the chosen language, tries the manual/original track first (`<lang>-orig`), then the auto-generated one (`<lang>`, which YouTube rate-limits with HTTP 429 when it's a translation), then falls back to English. Each candidate is a concrete language code, so yt-dlp fetches a single track rather than every caption the video has. A non-English transcript summarizes fine.
 2. **Clean** — strips the `WEBVTT` header, timing cues, inline tags, and the duplicate lines that rolling captions produce, leaving plain text.
 3. **Summarize** — sends the text to Ollama's `/api/generate` with a context window sized to the transcript length, and writes the markdown response to `<transcript>.summary.md`.
 

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -38,6 +39,7 @@ func main() {
 	model := flag.String("model", "gemma4:12b", "ollama model to use")
 	dir := flag.String("dir", defaultDir(), "directory to read/write transcript and summary files")
 	file := flag.String("file", "", "path to an already-downloaded .vtt file to summarize (skips download)")
+	lang := flag.String("lang", "", "transcript language code (e.g. en, pt); if unset, prompts, defaulting to English")
 	flag.Parse()
 
 	switch {
@@ -48,7 +50,7 @@ func main() {
 
 	case flag.NArg() == 1:
 		url := flag.Arg(0)
-		vttPath, err := downloadTranscript(url, *dir)
+		vttPath, err := downloadTranscript(url, *dir, resolveLang(*lang))
 		if err != nil {
 			fatal("download transcript: %v", err)
 		}
@@ -140,28 +142,65 @@ func fatal(format string, a ...any) {
 	os.Exit(1)
 }
 
-// subLangCandidates lists subtitle languages to try, in priority order.
-// English original/manual first; then "en", which for a non-English video is
-// an auto-translation that YouTube rate-limits with HTTP 429; then any
-// original-language caption (".*-orig"), which never 429s and which the LLM
-// can summarize fine even when it isn't English.
-var subLangCandidates = []string{"en-orig", "en", ".*-orig"}
+// resolveLang decides which transcript language to request. An explicit -lang
+// flag wins. Otherwise, on an interactive terminal, it asks (default English);
+// when stdin isn't a terminal (piped/cron) it silently defaults to English.
+func resolveLang(flagLang string) string {
+	if l := strings.TrimSpace(flagLang); l != "" {
+		return l
+	}
+	if !isTerminal(os.Stdin) {
+		return "en"
+	}
+	fmt.Print("Transcript language — default is English [en].\n" +
+		"Enter a language code (e.g. pt, es, fr) or press Enter for English: ")
+	sc := bufio.NewScanner(os.Stdin)
+	if sc.Scan() {
+		if l := strings.TrimSpace(sc.Text()); l != "" {
+			return l
+		}
+	}
+	return "en"
+}
+
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// langCandidates lists subtitle tracks to try for the chosen language, in
+// priority order: the manual/original track first, then the auto-generated one
+// (which for a translated track YouTube rate-limits with HTTP 429). English is
+// appended as a fallback when another language was requested. Each entry is a
+// concrete code — never a regex — so yt-dlp downloads one track, not every
+// original-language caption the video has.
+func langCandidates(lang string) []string {
+	c := []string{lang + "-orig", lang}
+	if lang != "en" {
+		c = append(c, "en-orig", "en")
+	}
+	return c
+}
 
 // downloadTranscript runs yt-dlp to fetch an auto/manual subtitle as .vtt into
-// dir, trying each candidate language until one produces a file, then returns
-// that file's path.
-func downloadTranscript(url, dir string) (string, error) {
+// dir, trying each candidate track for lang until one produces a file, then
+// returns that file's path.
+func downloadTranscript(url, dir, lang string) (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
 
+	candidates := langCandidates(lang)
 	var lastErr error
-	for _, lang := range subLangCandidates {
+	for _, sub := range candidates {
 		before := existingVTTs(dir)
 
 		cmd := exec.Command("yt-dlp",
 			"--write-auto-sub", "--write-sub", "--skip-download",
-			"--sub-langs", lang,
+			"--sub-langs", sub,
 			"--retries", "10", "--retry-sleep", "5",
 			"-P", dir,
 			url,
@@ -173,8 +212,6 @@ func downloadTranscript(url, dir string) (string, error) {
 		lastErr = cmd.Run()
 
 		after := existingVTTs(dir)
-		// ponytail: if ".*-orig" grabbed several captions, return an arbitrary
-		// one; fine since English-first candidates are tried before it.
 		for path := range after {
 			if !before[path] {
 				return path, nil
@@ -187,7 +224,7 @@ func downloadTranscript(url, dir string) (string, error) {
 		return path, nil
 	}
 	return "", fmt.Errorf("yt-dlp wrote no subtitle for languages [%s]; last error: %w",
-		strings.Join(subLangCandidates, ", "), lastErr)
+		strings.Join(candidates, ", "), lastErr)
 }
 
 func existingVTTs(dir string) map[string]bool {

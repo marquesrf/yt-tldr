@@ -37,6 +37,24 @@ this is a test
 	}
 }
 
+func TestLangCandidates(t *testing.T) {
+	// English: no duplicate fallback appended.
+	if got := langCandidates("en"); len(got) != 2 || got[0] != "en-orig" || got[1] != "en" {
+		t.Errorf("en: got %v", got)
+	}
+	// Other language: original + auto, then English fallback. No regex entries.
+	got := langCandidates("pt")
+	want := []string{"pt-orig", "pt", "en-orig", "en"}
+	if len(got) != len(want) {
+		t.Fatalf("pt: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pt[%d]: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestContextSizeFor(t *testing.T) {
 	if n := contextSizeFor("short"); n != 4096 {
 		t.Errorf("short prompt: got %d, want floor 4096", n)
