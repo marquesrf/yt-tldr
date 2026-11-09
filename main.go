@@ -23,7 +23,7 @@ const defaultDir = "/Users/marquesrf/Documents/youtube-videos-transcripts"
 var tagRE = regexp.MustCompile(`<[^>]+>`)
 
 func main() {
-	model := flag.String("model", "gemma4:e4b", "ollama model to use")
+	model := flag.String("model", "gemma4:12b", "ollama model to use")
 	dir := flag.String("dir", defaultDir, "directory to read/write transcript and summary files")
 	file := flag.String("file", "", "path to an already-downloaded .vtt file to summarize (skips download)")
 	flag.Parse()
@@ -73,7 +73,7 @@ func processMissingSummaries(dir, model string) error {
 
 	var pending []string
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".en.vtt") {
+		if !strings.HasSuffix(e.Name(), ".vtt") {
 			continue
 		}
 		vttPath := filepath.Join(dir, e.Name())
@@ -97,7 +97,7 @@ func processMissingSummaries(dir, model string) error {
 }
 
 func summaryPathFor(vttPath string) string {
-	return strings.TrimSuffix(vttPath, ".en.vtt") + ".summary.md"
+	return strings.TrimSuffix(vttPath, ".vtt") + ".summary.md"
 }
 
 // processVTT cleans a transcript file, summarizes it, and writes the result.
@@ -128,34 +128,54 @@ func fatal(format string, a ...any) {
 	os.Exit(1)
 }
 
-// downloadTranscript runs yt-dlp to fetch the English auto-sub as .vtt into dir,
-// then returns the path of the newly created file.
+// subLangCandidates lists subtitle languages to try, in priority order.
+// English original/manual first; then "en", which for a non-English video is
+// an auto-translation that YouTube rate-limits with HTTP 429; then any
+// original-language caption (".*-orig"), which never 429s and which the LLM
+// can summarize fine even when it isn't English.
+var subLangCandidates = []string{"en-orig", "en", ".*-orig"}
+
+// downloadTranscript runs yt-dlp to fetch an auto/manual subtitle as .vtt into
+// dir, trying each candidate language until one produces a file, then returns
+// that file's path.
 func downloadTranscript(url, dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
 
-	before := existingVTTs(dir)
+	var lastErr error
+	for _, lang := range subLangCandidates {
+		before := existingVTTs(dir)
 
-	cmd := exec.Command("yt-dlp",
-		"--write-auto-sub", "--skip-download", "--sub-lang", "en",
-		"-P", dir,
-		url,
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
+		cmd := exec.Command("yt-dlp",
+			"--write-auto-sub", "--write-sub", "--skip-download",
+			"--sub-langs", lang,
+			"--retries", "10", "--retry-sleep", "5",
+			"-P", dir,
+			url,
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		// A 429 on a throttled (translated) track exits non-zero; remember it
+		// and fall through to the next candidate rather than giving up.
+		lastErr = cmd.Run()
 
-	after := existingVTTs(dir)
-	for path := range after {
-		if !before[path] {
-			return path, nil
+		after := existingVTTs(dir)
+		// ponytail: if ".*-orig" grabbed several captions, return an arbitrary
+		// one; fine since English-first candidates are tried before it.
+		for path := range after {
+			if !before[path] {
+				return path, nil
+			}
 		}
 	}
-	// fall back: newest .vtt file, in case it already existed (re-run on same video)
-	return newestVTT(dir)
+
+	// Nothing new written. Maybe the file already exists (re-run on same video).
+	if path, err := newestVTT(dir); err == nil {
+		return path, nil
+	}
+	return "", fmt.Errorf("yt-dlp wrote no subtitle for languages [%s]; last error: %w",
+		strings.Join(subLangCandidates, ", "), lastErr)
 }
 
 func existingVTTs(dir string) map[string]bool {
@@ -229,6 +249,16 @@ Transcript:
 
 TL;DR (markdown):`
 
+// contextSizeFor estimates a token budget (~4 chars/token) for prompt plus
+// headroom for the response, so long transcripts don't starve generation.
+func contextSizeFor(prompt string) int {
+	tokens := len(prompt)/4 + 1024
+	if tokens < 4096 {
+		return 4096
+	}
+	return tokens
+}
+
 func summarize(transcript, model string) (string, error) {
 	prompt := fmt.Sprintf(promptTemplate, transcript)
 
@@ -236,6 +266,10 @@ func summarize(transcript, model string) (string, error) {
 		"model":  model,
 		"prompt": prompt,
 		"stream": false,
+		"think":  false,
+		"options": map[string]any{
+			"num_ctx": contextSizeFor(prompt),
+		},
 	})
 	if err != nil {
 		return "", err
