@@ -18,13 +18,25 @@ import (
 	"time"
 )
 
-const defaultDir = "/Users/marquesrf/Documents/youtube-videos-transcripts"
-
 var tagRE = regexp.MustCompile(`<[^>]+>`)
+
+// defaultDir is where transcripts and summaries live. Override with the
+// YT_TLDR_DIR env var or the -dir flag; falls back to ~/Documents/
+// youtube-videos-transcripts, or the current directory if $HOME is unknown.
+func defaultDir() string {
+	if d := os.Getenv("YT_TLDR_DIR"); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "transcripts"
+	}
+	return filepath.Join(home, "Documents", "youtube-videos-transcripts")
+}
 
 func main() {
 	model := flag.String("model", "gemma4:12b", "ollama model to use")
-	dir := flag.String("dir", defaultDir, "directory to read/write transcript and summary files")
+	dir := flag.String("dir", defaultDir(), "directory to read/write transcript and summary files")
 	file := flag.String("file", "", "path to an already-downloaded .vtt file to summarize (skips download)")
 	flag.Parse()
 
@@ -275,7 +287,10 @@ func summarize(transcript, model string) (string, error) {
 		return "", err
 	}
 
-	resp, err := http.Post("http://localhost:11434/api/generate", "application/json", bytes.NewReader(reqBody))
+	// Generation on a big model + long transcript can take minutes; cap it so a
+	// hung Ollama doesn't block forever.
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Post("http://localhost:11434/api/generate", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("calling ollama (is it running?): %w", err)
 	}
